@@ -1,0 +1,66 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Load config if exists
+[ -f "${HOME}/.bdrc" ] && source "${HOME}/.bdrc"
+
+export BD_URL="${BD_URL:-https://your-blackduck-server}"
+export BD_TOKEN="${BD_TOKEN:-}"
+
+if [ -z "$BD_TOKEN" ]; then
+  echo "Error: BD_TOKEN not set. Export it or put it in ~/.bdrc"
+  exit 1
+fi
+
+if [ $# -eq 0 ]; then
+  echo "Usage: bd <command> [args...]"
+  echo ""
+  echo "Available commands:"
+  jq -r 'include "lib/collection" as $c; $c | keys_unsorted[]' "$(dirname "$0")/lib/collection.jq" | sort
+  exit 1
+fi
+
+CMD="$1"
+shift
+
+# Build jq expression to get the request object
+REQUEST_JSON=$(jq -rn \
+  --arg cmd "$CMD" \
+  '
+  include "lib/collection" as $c;
+  include "lib/request";
+  $c[$cmd] // empty
+  ' -- "$(dirname "$0")")
+
+if [ -z "$REQUEST_JSON" ] || [ "$REQUEST_JSON" = "null" ]; then
+  echo "Unknown command: $CMD"
+  echo ""
+  echo "Available commands:"
+  jq -r 'include "lib/collection" as $c; $c | keys_unsorted[]' "$(dirname "$0")/lib/collection.jq" | sort
+  exit 1
+fi
+
+# Build curl command
+CURL_CMD=$(echo "$REQUEST_JSON" | jq -r '
+  include "lib/request";
+  .request.method as $m
+  | .request.url.raw as $u
+  | .request.body?.raw as $body
+  | request($m; $u; $body)
+')
+
+# Execute curl and capture output
+RESPONSE=$(eval "$CURL_CMD")
+
+# Pretty-print JSON responses
+if echo "$RESPONSE" | jq -e . >/dev/null 2>&1; then
+  echo "$RESPONSE" | jq -r '
+    include "lib/helpers" as $h;
+    if .items? then
+      $h::paginate
+      | if (. | length) > 0 then $h::table else empty end
+    else . end
+  ' -- "$(dirname "$0")"
+else
+  echo "$RESPONSE"
+fi
